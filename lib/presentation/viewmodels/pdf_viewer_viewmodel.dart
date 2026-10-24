@@ -37,6 +37,8 @@ class PdfViewerViewModel extends ChangeNotifier {
   bool get isFullScreen => _isFullScreen;
 
   String? tappedWord;
+  List<Rect> _selectionRects = [];
+  List<Rect> get selectionRects => _selectionRects;
 
   Future<void> _initSavedFile() async {
     final prefs = await SharedPreferences.getInstance();
@@ -81,6 +83,7 @@ class PdfViewerViewModel extends ChangeNotifier {
       _fileName = result.files.single.name;
       _currentPage = 1;
       tappedWord = null;
+      _selectionRects = [];
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('last_pdf_path', _filePath!);
@@ -106,8 +109,17 @@ class PdfViewerViewModel extends ChangeNotifier {
   }
 
   void clearSelection() {
-    if (tappedWord != null) {
+    if (tappedWord != null || _selectionRects.isNotEmpty) {
       tappedWord = null;
+      _selectionRects = [];
+
+      final delegate = pdfViewerController?.textSelectionDelegate;
+      if (delegate != null) {
+        try {
+          (delegate as dynamic).clearSelection();
+        } catch (_) {}
+      }
+
       notifyListeners();
     }
   }
@@ -150,7 +162,7 @@ class PdfViewerViewModel extends ChangeNotifier {
     );
 
     await noteRepository.saveNote(note);
-    tappedWord = null;
+    clearSelection();
     await loadNotes();
   }
 
@@ -212,16 +224,30 @@ class PdfViewerViewModel extends ChangeNotifier {
   Future<void> handleWordSelectionAt(Offset localPosition) async {
     if (pdfViewerController == null) return;
     try {
-      await pdfViewerController!.textSelectionDelegate.selectWord(localPosition);
-      final selected = await pdfViewerController!.textSelectionDelegate.getSelectedText();
-      if (selected != null && selected.trim().isNotEmpty) {
+      final delegate = pdfViewerController!.textSelectionDelegate;
+      await delegate.selectWord(localPosition);
+      final selected = await delegate.getSelectedText();
+
+      _selectionRects = [];
+      try {
+        final dynamicDelegate = delegate as dynamic;
+        final selectionState = dynamicDelegate.selectionState ?? dynamicDelegate.value;
+
+        if (selectionState != null) {
+          final rects = selectionState.rects ?? selectionState.selectionRects ?? const [];
+          if (rects is List) {
+            _selectionRects = rects.whereType<Rect>().toList();
+          }
+        }
+      } catch (_) {}
+
+      if (selected.trim().isNotEmpty) {
         final cleanWord = selected.trim().split(RegExp(r'\s+')).first;
         setSelectedWord(cleanWord);
       } else {
         clearSelection();
       }
-    } catch (e) {
-      // При клике в пустое место сбрасываем выделение
+    } catch (_) {
       clearSelection();
     }
   }

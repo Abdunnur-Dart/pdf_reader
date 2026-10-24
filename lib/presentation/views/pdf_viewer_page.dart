@@ -115,7 +115,29 @@ class PdfViewerPage extends StatelessWidget {
                     maxScale: 5.0,
                     scaleEnabled: true,
                     scaleByPointerScale: 1.15,
-                    textSelectionParams: const PdfTextSelectionParams(enabled: true),
+                    // 1. Отключаем стандартный синий фон выделения
+                    textSelectionParams: const PdfTextSelectionParams(
+                      enabled: true,
+                    ),
+                    // 2. Добавляем кастомную отрисовку маркера поверх текста
+                    pagePaintCallbacks: [
+                      (canvas, page, size) {
+                        if (viewModel.selectionRects.isNotEmpty) {
+                          final paint = Paint()
+                            ..color = Colors.amber.withOpacity(0.4) // Мягкий маркер
+                            ..style = PaintingStyle.fill;
+                          for (final rect in viewModel.selectionRects) {
+                            canvas.drawRRect(
+                              RRect.fromRectAndRadius(
+                                rect,
+                                const Radius.circular(3),
+                              ),
+                              paint,
+                            );
+                          }
+                        }
+                      },
+                    ],
                     onViewerReady: (doc, controller) =>
                         viewModel.onDocumentLoaded(doc, controller),
                     onPageChanged: (page) => viewModel.onPageChanged(page),
@@ -137,7 +159,7 @@ class PdfViewerPage extends StatelessWidget {
                       ),
                     ),
                   ),
-                // Карточка с заметкой или словом (теперь отображается и в полноэкранном режиме)
+                // Карточка с заметкой или словом
                 if (tappedWord != null)
                   Positioned(
                     bottom: 80,
@@ -240,4 +262,3 @@ class PdfViewerPage extends StatelessWidget {
     );
   }
 }
-//d
