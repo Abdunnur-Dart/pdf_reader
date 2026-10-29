@@ -112,21 +112,30 @@ class PdfViewerPage extends StatelessWidget {
                 PdfViewer.file(
                   viewModel.filePath!,
                   params: PdfViewerParams(
-                    maxScale: 5.0,
+                    // CHANGED: maxScale deprecated -> sizeDelegateProvider
+                    sizeDelegateProvider: const PdfViewerSizeDelegateProviderLegacy(
+                      maxScale: 5.0,
+                    ),
                     scaleEnabled: true,
                     scaleByPointerScale: 1.15,
-                    // 1. Отключаем стандартный синий фон выделения
                     textSelectionParams: const PdfTextSelectionParams(
-                      enabled: true,
+                      enabled: false,
                     ),
-                    // 2. Добавляем кастомную отрисовку маркера поверх текста
                     pagePaintCallbacks: [
-                      (canvas, page, size) {
-                        if (viewModel.selectionRects.isNotEmpty) {
+                      (canvas, pageRect, page) {
+                        // CHANGED: используем toRectInDocument с pageRect
+                        final notedRects = viewModel.notedWordPdfRects;
+                        if (notedRects.isNotEmpty) {
                           final paint = Paint()
-                            ..color = Colors.amber.withOpacity(0.4) // Мягкий маркер
+                            // CHANGED: withOpacity deprecated -> withValues
+                            ..color = Colors.yellow.withValues(alpha: 0.4)
                             ..style = PaintingStyle.fill;
-                          for (final rect in viewModel.selectionRects) {
+                          for (final pdfRect in notedRects) {
+                            // CHANGED: toRectInDocument вместо toRect
+                            final rect = pdfRect.toRectInDocument(
+                              page: page,
+                              pageRect: pageRect,
+                            );
                             canvas.drawRRect(
                               RRect.fromRectAndRadius(
                                 rect,
@@ -159,7 +168,6 @@ class PdfViewerPage extends StatelessWidget {
                       ),
                     ),
                   ),
-                // Карточка с заметкой или словом
                 if (tappedWord != null)
                   Positioned(
                     bottom: 80,
@@ -209,11 +217,11 @@ class PdfViewerPage extends StatelessWidget {
                             const SizedBox(width: 8),
                             ElevatedButton.icon(
                               icon: Icon(
-                                existingNote != null ? Icons.edit : Icons.note_add,
+                                existingNote != null ? Icons.visibility : Icons.note_add,
                                 size: 18,
                               ),
                               label: Text(
-                                existingNote != null ? 'Изменить' : 'Создать',
+                                existingNote != null ? 'Просмотреть' : 'Добавить',
                               ),
                               onPressed: () {
                                 _showNoteDialog(

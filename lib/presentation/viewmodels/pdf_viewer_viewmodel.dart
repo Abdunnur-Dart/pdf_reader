@@ -27,6 +27,12 @@ class PdfViewerViewModel extends ChangeNotifier {
 
   PdfViewerController? pdfViewerController;
 
+  // NEW: кэш структурированного текста
+  final Map<int, PdfPageText> _pageTextCache = {};
+
+  // NEW: кэш прямоугольников слов с заметками (координаты страницы PdfRect)
+  final Map<int, List<PdfRect>> _notedWordPdfRectsCache = {};
+
   String? get filePath => _filePath;
   String? get fileName => _fileName;
   int get totalPages => _totalPages;
@@ -37,8 +43,11 @@ class PdfViewerViewModel extends ChangeNotifier {
   bool get isFullScreen => _isFullScreen;
 
   String? tappedWord;
-  List<Rect> _selectionRects = [];
-  List<Rect> get selectionRects => _selectionRects;
+
+  // NEW: возвращает PdfRect для текущей страницы, pagePaintCallbacks преобразует их
+  List<PdfRect> get notedWordPdfRects {
+    return _notedWordPdfRectsCache[_currentPage] ?? const [];
+  }
 
   Future<void> _initSavedFile() async {
     final prefs = await SharedPreferences.getInstance();
@@ -83,7 +92,8 @@ class PdfViewerViewModel extends ChangeNotifier {
       _fileName = result.files.single.name;
       _currentPage = 1;
       tappedWord = null;
-      _selectionRects = [];
+      _pageTextCache.clear();
+      _notedWordPdfRectsCache.clear();
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('last_pdf_path', _filePath!);
@@ -98,20 +108,23 @@ class PdfViewerViewModel extends ChangeNotifier {
   void onDocumentLoaded(PdfDocument document, PdfViewerController controller) {
     _totalPages = document.pages.length;
     pdfViewerController = controller;
+    _pageTextCache.clear();
+    _notedWordPdfRectsCache.clear();
+    _rebuildNotedWordRects(_currentPage);
     notifyListeners();
   }
 
   void onPageChanged(int? pageNumber) {
     if (pageNumber != null) {
       _currentPage = pageNumber;
+      _rebuildNotedWordRects(_currentPage);
       notifyListeners();
     }
   }
 
   void clearSelection() {
-    if (tappedWord != null || _selectionRects.isNotEmpty) {
+    if (tappedWord != null) {
       tappedWord = null;
-      _selectionRects = [];
 
       final delegate = pdfViewerController?.textSelectionDelegate;
       if (delegate != null) {
@@ -146,6 +159,8 @@ class PdfViewerViewModel extends ChangeNotifier {
   Future<void> loadNotes() async {
     if (_filePath == null) return;
     _notes = await noteRepository.getNotesForPdf(_filePath!);
+    _notedWordPdfRectsCache.clear();
+    _rebuildNotedWordRects(_currentPage);
     notifyListeners();
   }
 
@@ -221,32 +236,164 @@ class PdfViewerViewModel extends ChangeNotifier {
     }
   }
 
-  Future<void> handleWordSelectionAt(Offset localPosition) async {
-    if (pdfViewerController == null) return;
+  Future<PdfPageText?> _getPageText(int pageNumber) async {
+    final controller = pdfViewerController;
+    if (controller == null) return null;
+    final pageIndex = pageNumber - 1;
+    if (pageIndex < 0 || pageIndex >= controller.document.pages.length) return null;
+
+    final cached = _pageTextCache[pageNumber];
+    if (cached != null) return cached;
+
+    final page = controller.document.pages[pageIndex];
     try {
-      final delegate = pdfViewerController!.textSelectionDelegate;
-      await delegate.selectWord(localPosition);
-      final selected = await delegate.getSelectedText();
+      final text = await page.loadStructuredText();
+      _pageTextCache[pageNumber] = text;
+      return text;
+    } catch (_) {
+      return null;
+    }
+  }
 
-      _selectionRects = [];
-      try {
-        final dynamicDelegate = delegate as dynamic;
-        final selectionState = dynamicDelegate.selectionState ?? dynamicDelegate.value;
+  // NEW: пересчитать PdfRect слов с заметками
+  Future<void> _rebuildNotedWordRects(int pageNumber) async {
+    if (_filePath == null) return;
 
-        if (selectionState != null) {
-          final rects = selectionState.rects ?? selectionState.selectionRects ?? const [];
-          if (rects is List) {
-            _selectionRects = rects.whereType<Rect>().toList();
+    final pageNotes = _notes.where((n) => n.pageNumber == pageNumber).toList();
+    if (pageNotes.isEmpty) {
+      _notedWordPdfRectsCache[pageNumber] = const [];
+      return;
+    }
+
+    final pageText = await _getPageText(pageNumber);
+    if (pageText == null || pageText.fullText.isEmpty) {
+      _notedWordPdfRectsCache[pageNumber] = const [];
+      return;
+    }
+
+    final rects = <PdfRect>[];
+    final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
+
+    for (final note in pageNotes) {
+      final targetWord = note.selectedText.trim().toLowerCase();
+      if (targetWord.isEmpty) continue;
+
+      final textLower = pageText.fullText.toLowerCase();
+      int searchFrom = 0;
+      while (true) {
+        final idx = textLower.indexOf(targetWord, searchFrom);
+        if (idx < 0) break;
+
+        final beforeOk = idx == 0 ||
+            separatorPattern.hasMatch(pageText.fullText[idx - 1]);
+        final afterIdx = idx + targetWord.length;
+        final afterOk = afterIdx >= pageText.fullText.length ||
+            separatorPattern.hasMatch(pageText.fullText[afterIdx]);
+
+        if (beforeOk && afterOk) {
+          for (int i = idx; i < afterIdx; i++) {
+            if (i >= pageText.charRects.length) break;
+            rects.add(pageText.charRects[i]);
           }
         }
-      } catch (_) {}
-
-      if (selected.trim().isNotEmpty) {
-        final cleanWord = selected.trim().split(RegExp(r'\s+')).first;
-        setSelectedWord(cleanWord);
-      } else {
-        clearSelection();
+        searchFrom = idx + targetWord.length;
       }
+    }
+
+    _notedWordPdfRectsCache[pageNumber] = rects;
+    notifyListeners();
+  }
+
+  Future<void> handleWordSelectionAt(Offset localPosition) async {
+    final controller = pdfViewerController;
+    if (controller == null) return;
+
+    try {
+      final pageIndex = _currentPage - 1;
+      if (pageIndex < 0 || pageIndex >= controller.document.pages.length) {
+        clearSelection();
+        return;
+      }
+
+      final page = controller.document.pages[pageIndex];
+      final pageText = await _getPageText(_currentPage);
+      if (pageText == null) {
+        clearSelection();
+        return;
+      }
+
+      if (pageText.fullText.isEmpty || pageText.charRects.isEmpty) {
+        clearSelection();
+        return;
+      }
+
+      final docPos = controller.localToDocument(localPosition);
+
+      final pageLayouts = controller.layout.pageLayouts;
+      if (pageIndex >= pageLayouts.length) {
+        clearSelection();
+        return;
+      }
+
+      final pageRect = pageLayouts[pageIndex];
+      if (!pageRect.contains(docPos)) {
+        clearSelection();
+        return;
+      }
+
+      final pageOffset = docPos - pageRect.topLeft;
+      final pdfPoint = pageOffset.toPdfPoint(
+        page: page,
+        scaledPageSize: pageRect.size,
+      );
+
+      int hitIndex = -1;
+      double minDistance = double.infinity;
+
+      for (int i = 0; i < pageText.charRects.length; i++) {
+        final charRect = pageText.charRects[i];
+        final charCenter = PdfPoint(
+          (charRect.left + charRect.right) / 2,
+          (charRect.top + charRect.bottom) / 2,
+        );
+        final dx = charCenter.x - pdfPoint.x;
+        final dy = charCenter.y - pdfPoint.y;
+        final distance = dx * dx + dy * dy;
+        if (distance < minDistance) {
+          minDistance = distance;
+          hitIndex = i;
+        }
+      }
+
+      if (hitIndex < 0) {
+        clearSelection();
+        return;
+      }
+
+      final fullText = pageText.fullText;
+      if (hitIndex >= fullText.length) {
+        clearSelection();
+        return;
+      }
+
+      final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
+      int startIndex = hitIndex;
+      int endIndex = hitIndex;
+
+      while (startIndex > 0 && !separatorPattern.hasMatch(fullText[startIndex - 1])) {
+        startIndex--;
+      }
+      while (endIndex < fullText.length - 1 && !separatorPattern.hasMatch(fullText[endIndex + 1])) {
+        endIndex++;
+      }
+
+      final word = fullText.substring(startIndex, endIndex + 1).trim();
+      if (word.isEmpty) {
+        clearSelection();
+        return;
+      }
+
+      setSelectedWord(word);
     } catch (_) {
       clearSelection();
     }
