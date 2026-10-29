@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart'; // НУЖНО ДОБАВИТЬ В pubspec.yaml
 import 'package:pdfrx/pdfrx.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -25,13 +27,14 @@ class PdfViewerViewModel extends ChangeNotifier {
   bool _isDarkMode = false;
   bool _isFullScreen = false;
 
+  // История открытых документов
+  final List<String> _documents = [];
+
   PdfViewerController? pdfViewerController;
 
-  // NEW: кэш структурированного текста
   final Map<int, PdfPageText> _pageTextCache = {};
-
-  // NEW: кэш прямоугольников слов с заметками (координаты страницы PdfRect)
   final Map<int, List<PdfRect>> _notedWordPdfRectsCache = {};
+  final Map<int, List<PdfRect>> _selectedWordPdfRectsCache = {};
 
   String? get filePath => _filePath;
   String? get fileName => _fileName;
@@ -42,21 +45,108 @@ class PdfViewerViewModel extends ChangeNotifier {
   bool get isDarkMode => _isDarkMode;
   bool get isFullScreen => _isFullScreen;
 
+  List<String> get documents => List.unmodifiable(_documents);
+
   String? tappedWord;
 
-  // NEW: возвращает PdfRect для текущей страницы, pagePaintCallbacks преобразует их
-  List<PdfRect> get notedWordPdfRects {
-    return _notedWordPdfRectsCache[_currentPage] ?? const [];
+  List<PdfRect> get notedWordPdfRects => _notedWordPdfRectsCache[_currentPage] ?? const [];
+  List<PdfRect> get selectedWordPdfRects => _selectedWordPdfRectsCache[_currentPage] ?? const [];
+
+  List<PdfRect> get notedWordPdfRectsExcludingSelection {
+    final noted = notedWordPdfRects;
+    final selected = selectedWordPdfRects;
+    if (noted.isEmpty) return const [];
+    if (selected.isEmpty) return noted;
+    return noted.where((notedRect) {
+      for (final selRect in selected) {
+        if (_pdfRectsIntersect(notedRect, selRect)) return false;
+      }
+      return true;
+    }).toList(growable: false);
+  }
+
+  static bool _pdfRectsIntersect(PdfRect a, PdfRect b) {
+    const epsilon = 1.0;
+    return a.left < b.right - epsilon &&
+        a.right > b.left + epsilon &&
+        a.top < b.bottom - epsilon &&
+        a.bottom > b.top + epsilon;
+  }
+
+  static List<PdfRect> _mergeCharRectsToLines(List<PdfRect> charRects) {
+    if (charRects.isEmpty) return const [];
+    if (charRects.length == 1) {
+      final r = charRects.first;
+      return [PdfRect(r.left - 2.0, r.top - 2.0, r.right + 2.0, r.bottom + 2.0)];
+    }
+
+    final sorted = List<PdfRect>.from(charRects)..sort((a, b) => a.top.compareTo(b.top));
+    final lines = <List<PdfRect>>[];
+
+    for (final rect in sorted) {
+      final centerY = (rect.top + rect.bottom) / 2;
+      List<PdfRect>? currentLine;
+      
+      for (final line in lines) {
+        final lineTop = line.map((r) => r.top).reduce((a, b) => a < b ? a : b);
+        final lineBottom = line.map((r) => r.bottom).reduce((a, b) => a > b ? a : b);
+        
+        if (centerY >= lineTop && centerY <= lineBottom) {
+          currentLine = line;
+          break;
+        }
+      }
+
+      if (currentLine == null) {
+        lines.add([rect]);
+      } else {
+        currentLine.add(rect);
+      }
+    }
+
+    final finalRects = <PdfRect>[];
+    for (final line in lines) {
+      double minLeft = double.infinity;
+      double minTop = double.infinity;
+      double maxRight = double.negativeInfinity;
+      double maxBottom = double.negativeInfinity;
+
+      for (final rect in line) {
+        if (rect.left < minLeft) minLeft = rect.left;
+        if (rect.top < minTop) minTop = rect.top;
+        if (rect.right > maxRight) maxRight = rect.right;
+        if (rect.bottom > maxBottom) maxBottom = rect.bottom;
+      }
+
+      const padX = 2.0;
+      const padY = 2.0;
+
+      finalRects.add(PdfRect(minLeft - padX, minTop - padY, maxRight + padX, maxBottom + padY));
+    }
+
+    return finalRects;
   }
 
   Future<void> _initSavedFile() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    _documents.clear();
+    final docsList = prefs.getStringList('saved_pdf_documents');
+    if (docsList != null) {
+      _documents.addAll(docsList);
+    }
+
     final savedPath = prefs.getString('last_pdf_path');
     final savedName = prefs.getString('last_pdf_name');
 
     if (savedPath != null) {
       _filePath = savedPath;
       _fileName = savedName ?? 'Документ';
+      
+      if (!_documents.contains(savedPath)) {
+        _documents.add(savedPath);
+      }
+
       await loadNotes();
       await loadBookmarks();
       notifyListeners();
@@ -88,16 +178,34 @@ class PdfViewerViewModel extends ChangeNotifier {
     );
 
     if (result != null && result.files.single.path != null) {
-      _filePath = result.files.single.path;
-      _fileName = result.files.single.name;
+      final originalFile = File(result.files.single.path!);
+      final originalName = result.files.single.name;
+
+      // 1. Получаем папку приложения (внутренняя память)
+      final appDir = await getApplicationDocumentsDirectory();
+      final safeFileName = '${DateTime.now().millisecondsSinceEpoch}_$originalName';
+      final savedFile = File('${appDir.path}/$safeFileName');
+
+      // 2. Копируем файл, чтобы он не удалился вместе с оригиналом
+      await originalFile.copy(savedFile.path);
+
+      // 3. Устанавливаем пути на сохраненную копию
+      _filePath = savedFile.path;
+      _fileName = originalName;
       _currentPage = 1;
       tappedWord = null;
       _pageTextCache.clear();
       _notedWordPdfRectsCache.clear();
+      _selectedWordPdfRectsCache.clear();
+
+      if (!_documents.contains(_filePath)) {
+        _documents.insert(0, _filePath!);
+      }
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('last_pdf_path', _filePath!);
       await prefs.setString('last_pdf_name', _fileName!);
+      await prefs.setStringList('saved_pdf_documents', _documents);
 
       await loadNotes();
       await loadBookmarks();
@@ -105,12 +213,76 @@ class PdfViewerViewModel extends ChangeNotifier {
     }
   }
 
+  Future<void> removeDocument(String path) async {
+    _documents.remove(path);
+
+    // Опционально: удаляем сам файл из внутренней памяти, если пользователь удаляет из библиотеки
+    try {
+      final f = File(path);
+      if (await f.exists()) {
+        await f.delete();
+      }
+    } catch (_) {}
+
+    if (_filePath == path) {
+      _filePath = null;
+      _fileName = null;
+      _totalPages = 0;
+      _currentPage = 1;
+      _notes.clear();
+      _bookmarks.clear();
+      tappedWord = null;
+      _pageTextCache.clear();
+      _notedWordPdfRectsCache.clear();
+      _selectedWordPdfRectsCache.clear();
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('saved_pdf_documents', _documents);
+
+    if (_filePath == null) {
+      await prefs.remove('last_pdf_path');
+      await prefs.remove('last_pdf_name');
+    }
+
+    notifyListeners();
+  }
+
+  Future<void> openDocument(String path) async {
+    if (_filePath == path) {
+      notifyListeners();
+      return;
+    }
+
+    _filePath = path;
+    _fileName = path.split(RegExp(r'[/\\]')).last.split('_').last; // Отрезаем timestamp
+    _currentPage = 1;
+    tappedWord = null;
+    _pageTextCache.clear();
+    _notedWordPdfRectsCache.clear();
+    _selectedWordPdfRectsCache.clear();
+
+    _documents.remove(path);
+    _documents.insert(0, path);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_pdf_path', _filePath!);
+    await prefs.setString('last_pdf_name', _fileName!);
+    await prefs.setStringList('saved_pdf_documents', _documents);
+
+    await loadNotes();
+    await loadBookmarks();
+    notifyListeners();
+  }
+
   void onDocumentLoaded(PdfDocument document, PdfViewerController controller) {
     _totalPages = document.pages.length;
     pdfViewerController = controller;
     _pageTextCache.clear();
     _notedWordPdfRectsCache.clear();
+    _selectedWordPdfRectsCache.clear();
     _rebuildNotedWordRects(_currentPage);
+    _rebuildSelectedWordRects(_currentPage);
     notifyListeners();
   }
 
@@ -118,6 +290,7 @@ class PdfViewerViewModel extends ChangeNotifier {
     if (pageNumber != null) {
       _currentPage = pageNumber;
       _rebuildNotedWordRects(_currentPage);
+      _rebuildSelectedWordRects(_currentPage);
       notifyListeners();
     }
   }
@@ -125,6 +298,7 @@ class PdfViewerViewModel extends ChangeNotifier {
   void clearSelection() {
     if (tappedWord != null) {
       tappedWord = null;
+      _selectedWordPdfRectsCache[_currentPage] = const [];
 
       final delegate = pdfViewerController?.textSelectionDelegate;
       if (delegate != null) {
@@ -140,6 +314,7 @@ class PdfViewerViewModel extends ChangeNotifier {
   void setSelectedWord(String? word) {
     if (tappedWord != word) {
       tappedWord = word;
+      _rebuildSelectedWordRects(_currentPage);
       notifyListeners();
     }
   }
@@ -161,17 +336,25 @@ class PdfViewerViewModel extends ChangeNotifier {
     _notes = await noteRepository.getNotesForPdf(_filePath!);
     _notedWordPdfRectsCache.clear();
     _rebuildNotedWordRects(_currentPage);
+    _rebuildSelectedWordRects(_currentPage);
     notifyListeners();
   }
 
-  Future<void> saveOrUpdateNote(String content, {String? existingNoteId}) async {
+  Future<void> saveOrUpdateNote(
+    String content, {
+    String? existingNoteId,
+    String? title,
+  }) async {
     if (_filePath == null || tappedWord == null) return;
+
+    String finalTitle = title ?? 'Заметка к "$tappedWord"';
 
     final note = Note(
       id: existingNoteId ?? DateTime.now().millisecondsSinceEpoch.toString(),
       pdfPath: _filePath!,
       pageNumber: _currentPage,
       selectedText: tappedWord!,
+      title: finalTitle,
       content: content,
       createdAt: DateTime.now(),
     );
@@ -179,6 +362,16 @@ class PdfViewerViewModel extends ChangeNotifier {
     await noteRepository.saveNote(note);
     clearSelection();
     await loadNotes();
+  }
+
+  Future<void> updateNoteTitle(String noteId, String newTitle) async {
+    if (_filePath == null) return;
+    final index = _notes.indexWhere((n) => n.id == noteId);
+    if (index != -1) {
+      final updatedNote = _notes[index].copyWith(title: newTitle);
+      await noteRepository.saveNote(updatedNote);
+      await loadNotes();
+    }
   }
 
   Future<void> deleteNote(String noteId) async {
@@ -255,7 +448,6 @@ class PdfViewerViewModel extends ChangeNotifier {
     }
   }
 
-  // NEW: пересчитать PdfRect слов с заметками
   Future<void> _rebuildNotedWordRects(int pageNumber) async {
     if (_filePath == null) return;
 
@@ -271,7 +463,7 @@ class PdfViewerViewModel extends ChangeNotifier {
       return;
     }
 
-    final rects = <PdfRect>[];
+    final rawRects = <PdfRect>[]; 
     final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
 
     for (final note in pageNotes) {
@@ -293,15 +485,61 @@ class PdfViewerViewModel extends ChangeNotifier {
         if (beforeOk && afterOk) {
           for (int i = idx; i < afterIdx; i++) {
             if (i >= pageText.charRects.length) break;
-            rects.add(pageText.charRects[i]);
+            rawRects.add(pageText.charRects[i]); 
           }
         }
         searchFrom = idx + targetWord.length;
       }
     }
 
-    _notedWordPdfRectsCache[pageNumber] = rects;
+    _notedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects); 
     notifyListeners();
+  }
+
+  Future<void> _rebuildSelectedWordRects(int pageNumber) async {
+    if (_filePath == null) {
+      _selectedWordPdfRectsCache[pageNumber] = const [];
+      return;
+    }
+
+    final word = tappedWord?.trim();
+    if (word == null || word.isEmpty) {
+      _selectedWordPdfRectsCache[pageNumber] = const [];
+      return;
+    }
+
+    final pageText = await _getPageText(pageNumber);
+    if (pageText == null || pageText.fullText.isEmpty) {
+      _selectedWordPdfRectsCache[pageNumber] = const [];
+      return;
+    }
+
+    final targetWord = word.toLowerCase();
+    final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
+    final rawRects = <PdfRect>[]; 
+
+    final textLower = pageText.fullText.toLowerCase();
+    int searchFrom = 0;
+    while (true) {
+      final idx = textLower.indexOf(targetWord, searchFrom);
+      if (idx < 0) break;
+
+      final beforeOk = idx == 0 ||
+          separatorPattern.hasMatch(pageText.fullText[idx - 1]);
+      final afterIdx = idx + targetWord.length;
+      final afterOk = afterIdx >= pageText.fullText.length ||
+          separatorPattern.hasMatch(pageText.fullText[afterIdx]);
+
+      if (beforeOk && afterOk) {
+        for (int i = idx; i < afterIdx; i++) {
+          if (i >= pageText.charRects.length) break;
+          rawRects.add(pageText.charRects[i]); 
+        }
+      }
+      searchFrom = idx + targetWord.length;
+    }
+
+    _selectedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects); 
   }
 
   Future<void> handleWordSelectionAt(Offset localPosition) async {

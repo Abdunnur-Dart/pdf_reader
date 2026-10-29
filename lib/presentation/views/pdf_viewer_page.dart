@@ -123,8 +123,36 @@ class PdfViewerPage extends StatelessWidget {
                     ),
                     pagePaintCallbacks: [
                       (canvas, pageRect, page) {
+                        // NEW: сначала рисуем зелёную подсветку выделенного слова.
+                        // Жёлтые заметки рисуются ниже, но с исключением тех
+                        // прямоугольников, что пересекаются с выделением.
+
+                        // NEW: зелёная подсветка выделенного слова
+                        final selectedRects = viewModel.selectedWordPdfRects;
+                        if (selectedRects.isNotEmpty) {
+                          final selectedPaint = Paint()
+                            ..color = Colors.green.withValues(alpha: 0.35)
+                            ..style = PaintingStyle.fill;
+                          for (final pdfRect in selectedRects) {
+                            final rect = pdfRect.toRectInDocument(
+                              page: page,
+                              pageRect: pageRect,
+                            );
+                            canvas.drawRRect(
+                              RRect.fromRectAndRadius(
+                                rect,
+                                const Radius.circular(3),
+                              ),
+                              selectedPaint,
+                            );
+                          }
+                        }
+
                         // CHANGED: используем toRectInDocument с pageRect
-                        final notedRects = viewModel.notedWordPdfRects;
+                        // CHANGED: берём прямоугольники заметок, исключая пересекающиеся
+                        //          с выделением (чтобы выделенное слово было зелёным,
+                        //          а не жёлтым).
+                        final notedRects = viewModel.notedWordPdfRectsExcludingSelection; // CHANGED
                         if (notedRects.isNotEmpty) {
                           final paint = Paint()
                             // CHANGED: withOpacity deprecated -> withValues

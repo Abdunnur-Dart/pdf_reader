@@ -1,0 +1,50 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'data/repositories/note_repository_impl.dart'; // Ваши импорты
+import 'presentation/viewmodels/pdf_viewer_viewmodel.dart';
+import 'presentation/views/main_navigation_page.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Инициализация репозитория (пример)
+  final noteRepository = NoteRepositoryImpl();
+
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => PdfViewerViewModel(noteRepository: noteRepository),
+      child: const MyApp(),
+    ),
+  );
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Слушаем изменения темы
+    final isDarkMode = context.watch<PdfViewerViewModel>().isDarkMode;
+
+    return MaterialApp(
+      title: 'PDF Reader',
+      debugShowCheckedModeBanner: false,
+      themeMode: isDarkMode ? ThemeMode.dark : ThemeMode.light,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      home: const MainNavigationPage(),
+    );
+  }
+}

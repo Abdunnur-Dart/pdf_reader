@@ -1,10 +1,9 @@
-import 'dart:convert';
-
 class Note {
   final String id;
   final String pdfPath;
   final int pageNumber;
   final String selectedText;
+  final String title; // НОВОЕ ПОЛЕ
   final String content;
   final DateTime createdAt;
 
@@ -13,34 +12,43 @@ class Note {
     required this.pdfPath,
     required this.pageNumber,
     required this.selectedText,
+    required this.title,
     required this.content,
     required this.createdAt,
   });
 
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'pdfPath': pdfPath,
-      'pageNumber': pageNumber,
-      'selectedText': selectedText,
-      'content': content,
-      'createdAt': createdAt.toIso8601String(),
-    };
-  }
-
-  factory Note.fromMap(Map<String, dynamic> map) {
+  Note copyWith({
+    String? title,
+    String? content,
+  }) {
     return Note(
-      id: map['id'] as String,
-      pdfPath: map['pdfPath'] as String,
-      pageNumber: map['pageNumber'] as int,
-      selectedText: map['selectedText'] as String,
-      content: map['content'] as String,
-      createdAt: DateTime.parse(map['createdAt'] as String),
+      id: id,
+      pdfPath: pdfPath,
+      pageNumber: pageNumber,
+      selectedText: selectedText,
+      title: title ?? this.title,
+      content: content ?? this.content,
+      createdAt: createdAt,
     );
   }
 
-  String toJson() => json.encode(toMap());
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'pdfPath': pdfPath,
+        'pageNumber': pageNumber,
+        'selectedText': selectedText,
+        'title': title,
+        'content': content,
+        'createdAt': createdAt.toIso8601String(),
+      };
 
-  factory Note.fromJson(String source) =>
-      Note.fromMap(json.decode(source) as Map<String, dynamic>);
+  factory Note.fromJson(Map<String, dynamic> json) => Note(
+        id: json['id'] as String,
+        pdfPath: json['pdfPath'] as String,
+        pageNumber: json['pageNumber'] as int,
+        selectedText: json['selectedText'] as String,
+        title: json['title'] as String? ?? 'Без названия', // Поддержка старых заметок
+        content: json['content'] as String,
+        createdAt: DateTime.parse(json['createdAt'] as String),
+      );
 }
