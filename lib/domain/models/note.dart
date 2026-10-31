@@ -3,11 +3,11 @@ class Note {
   final String pdfPath;
   final int pageNumber;
   final String selectedText;
-  final String title; // НОВОЕ ПОЛЕ
+  final String title;
   final String content;
   final DateTime createdAt;
 
-  Note({
+  const Note({
     required this.id,
     required this.pdfPath,
     required this.pageNumber,
@@ -18,17 +18,22 @@ class Note {
   });
 
   Note copyWith({
+    String? id,
+    String? pdfPath,
+    int? pageNumber,
+    String? selectedText,
     String? title,
     String? content,
+    DateTime? createdAt,
   }) {
     return Note(
-      id: id,
-      pdfPath: pdfPath,
-      pageNumber: pageNumber,
-      selectedText: selectedText,
+      id: id ?? this.id,
+      pdfPath: pdfPath ?? this.pdfPath,
+      pageNumber: pageNumber ?? this.pageNumber,
+      selectedText: selectedText ?? this.selectedText,
       title: title ?? this.title,
       content: content ?? this.content,
-      createdAt: createdAt,
+      createdAt: createdAt ?? this.createdAt,
     );
   }
 
@@ -47,7 +52,7 @@ class Note {
         pdfPath: json['pdfPath'] as String,
         pageNumber: json['pageNumber'] as int,
         selectedText: json['selectedText'] as String,
-        title: json['title'] as String? ?? 'Без названия', // Поддержка старых заметок
+        title: json['title'] as String,
         content: json['content'] as String,
         createdAt: DateTime.parse(json['createdAt'] as String),
       );

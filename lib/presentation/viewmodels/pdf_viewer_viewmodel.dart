@@ -1,19 +1,26 @@
 import 'dart:io';
+import 'dart:ui';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart'; // НУЖНО ДОБАВИТЬ В pubspec.yaml
+import 'package:path_provider/path_provider.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../domain/models/bookmark.dart';
+import '../../domain/models/drawing.dart';
 import '../../domain/models/note.dart';
+import '../../domain/repositories/drawing_repository.dart';
 import '../../domain/repositories/note_repository.dart';
 
 class PdfViewerViewModel extends ChangeNotifier {
   final NoteRepository noteRepository;
+  final DrawingRepository drawingRepository;
 
-  PdfViewerViewModel({required this.noteRepository}) {
+  PdfViewerViewModel({
+    required this.noteRepository,
+    required this.drawingRepository,
+  }) {
     _initSavedFile();
     _initTheme();
   }
@@ -27,7 +34,6 @@ class PdfViewerViewModel extends ChangeNotifier {
   bool _isDarkMode = false;
   bool _isFullScreen = false;
 
-  // История открытых документов
   final List<String> _documents = [];
 
   PdfViewerController? pdfViewerController;
@@ -35,6 +41,16 @@ class PdfViewerViewModel extends ChangeNotifier {
   final Map<int, PdfPageText> _pageTextCache = {};
   final Map<int, List<PdfRect>> _notedWordPdfRectsCache = {};
   final Map<int, List<PdfRect>> _selectedWordPdfRectsCache = {};
+
+  // === РИСОВАНИЕ ===
+  bool _isDrawMode = false;
+  Color _drawColor = Colors.red;
+  double _drawWidth = 3.0;
+  final List<PageDrawing> _drawings = [];
+  DrawingStroke? _currentStroke;
+
+  // === ЛАСТИК ===
+  bool _isEraserMode = false;
 
   String? get filePath => _filePath;
   String? get fileName => _fileName;
@@ -49,8 +65,10 @@ class PdfViewerViewModel extends ChangeNotifier {
 
   String? tappedWord;
 
-  List<PdfRect> get notedWordPdfRects => _notedWordPdfRectsCache[_currentPage] ?? const [];
-  List<PdfRect> get selectedWordPdfRects => _selectedWordPdfRectsCache[_currentPage] ?? const [];
+  List<PdfRect> get notedWordPdfRects =>
+      _notedWordPdfRectsCache[_currentPage] ?? const [];
+  List<PdfRect> get selectedWordPdfRects =>
+      _selectedWordPdfRectsCache[_currentPage] ?? const [];
 
   List<PdfRect> get notedWordPdfRectsExcludingSelection {
     final noted = notedWordPdfRects;
@@ -63,6 +81,22 @@ class PdfViewerViewModel extends ChangeNotifier {
       }
       return true;
     }).toList(growable: false);
+  }
+
+  // === Геттеры рисования / ластика ===
+  bool get isDrawMode => _isDrawMode;
+  bool get isEraserMode => _isEraserMode;
+  Color get drawColor => _drawColor;
+  double get drawWidth => _drawWidth;
+  DrawingStroke? get currentStroke => _currentStroke;
+  List<PageDrawing> get drawings => List.unmodifiable(_drawings);
+
+  /// Штрихи текущей страницы (для pagePaintCallbacks).
+  List<DrawingStroke> get currentPageStrokes {
+    for (final d in _drawings) {
+      if (d.pageNumber == _currentPage) return d.strokes;
+    }
+    return const [];
   }
 
   static bool _pdfRectsIntersect(PdfRect a, PdfRect b) {
@@ -80,17 +114,20 @@ class PdfViewerViewModel extends ChangeNotifier {
       return [PdfRect(r.left - 2.0, r.top - 2.0, r.right + 2.0, r.bottom + 2.0)];
     }
 
-    final sorted = List<PdfRect>.from(charRects)..sort((a, b) => a.top.compareTo(b.top));
+    final sorted = List<PdfRect>.from(charRects)
+      ..sort((a, b) => a.top.compareTo(b.top));
     final lines = <List<PdfRect>>[];
 
     for (final rect in sorted) {
       final centerY = (rect.top + rect.bottom) / 2;
       List<PdfRect>? currentLine;
-      
+
       for (final line in lines) {
-        final lineTop = line.map((r) => r.top).reduce((a, b) => a < b ? a : b);
-        final lineBottom = line.map((r) => r.bottom).reduce((a, b) => a > b ? a : b);
-        
+        final lineTop =
+            line.map((r) => r.top).reduce((a, b) => a < b ? a : b);
+        final lineBottom =
+            line.map((r) => r.bottom).reduce((a, b) => a > b ? a : b);
+
         if (centerY >= lineTop && centerY <= lineBottom) {
           currentLine = line;
           break;
@@ -121,7 +158,8 @@ class PdfViewerViewModel extends ChangeNotifier {
       const padX = 2.0;
       const padY = 2.0;
 
-      finalRects.add(PdfRect(minLeft - padX, minTop - padY, maxRight + padX, maxBottom + padY));
+      finalRects.add(PdfRect(
+          minLeft - padX, minTop - padY, maxRight + padX, maxBottom + padY));
     }
 
     return finalRects;
@@ -129,7 +167,7 @@ class PdfViewerViewModel extends ChangeNotifier {
 
   Future<void> _initSavedFile() async {
     final prefs = await SharedPreferences.getInstance();
-    
+
     _documents.clear();
     final docsList = prefs.getStringList('saved_pdf_documents');
     if (docsList != null) {
@@ -142,13 +180,14 @@ class PdfViewerViewModel extends ChangeNotifier {
     if (savedPath != null) {
       _filePath = savedPath;
       _fileName = savedName ?? 'Документ';
-      
+
       if (!_documents.contains(savedPath)) {
         _documents.add(savedPath);
       }
 
       await loadNotes();
       await loadBookmarks();
+      await loadDrawings();
       notifyListeners();
     }
   }
@@ -181,22 +220,24 @@ class PdfViewerViewModel extends ChangeNotifier {
       final originalFile = File(result.files.single.path!);
       final originalName = result.files.single.name;
 
-      // 1. Получаем папку приложения (внутренняя память)
       final appDir = await getApplicationDocumentsDirectory();
-      final safeFileName = '${DateTime.now().millisecondsSinceEpoch}_$originalName';
+      final safeFileName =
+          '${DateTime.now().millisecondsSinceEpoch}_$originalName';
       final savedFile = File('${appDir.path}/$safeFileName');
 
-      // 2. Копируем файл, чтобы он не удалился вместе с оригиналом
       await originalFile.copy(savedFile.path);
 
-      // 3. Устанавливаем пути на сохраненную копию
       _filePath = savedFile.path;
       _fileName = originalName;
       _currentPage = 1;
       tappedWord = null;
+      _currentStroke = null;
+      _isDrawMode = false;
+      _isEraserMode = false;
       _pageTextCache.clear();
       _notedWordPdfRectsCache.clear();
       _selectedWordPdfRectsCache.clear();
+      _drawings.clear();
 
       if (!_documents.contains(_filePath)) {
         _documents.insert(0, _filePath!);
@@ -209,6 +250,7 @@ class PdfViewerViewModel extends ChangeNotifier {
 
       await loadNotes();
       await loadBookmarks();
+      await loadDrawings();
       notifyListeners();
     }
   }
@@ -216,7 +258,6 @@ class PdfViewerViewModel extends ChangeNotifier {
   Future<void> removeDocument(String path) async {
     _documents.remove(path);
 
-    // Опционально: удаляем сам файл из внутренней памяти, если пользователь удаляет из библиотеки
     try {
       final f = File(path);
       if (await f.exists()) {
@@ -231,6 +272,10 @@ class PdfViewerViewModel extends ChangeNotifier {
       _currentPage = 1;
       _notes.clear();
       _bookmarks.clear();
+      _drawings.clear();
+      _currentStroke = null;
+      _isDrawMode = false;
+      _isEraserMode = false;
       tappedWord = null;
       _pageTextCache.clear();
       _notedWordPdfRectsCache.clear();
@@ -255,12 +300,16 @@ class PdfViewerViewModel extends ChangeNotifier {
     }
 
     _filePath = path;
-    _fileName = path.split(RegExp(r'[/\\]')).last.split('_').last; // Отрезаем timestamp
+    _fileName = path.split(RegExp(r'[/\\]')).last.split('_').last;
     _currentPage = 1;
     tappedWord = null;
+    _currentStroke = null;
+    _isDrawMode = false;
+    _isEraserMode = false;
     _pageTextCache.clear();
     _notedWordPdfRectsCache.clear();
     _selectedWordPdfRectsCache.clear();
+    _drawings.clear();
 
     _documents.remove(path);
     _documents.insert(0, path);
@@ -272,6 +321,7 @@ class PdfViewerViewModel extends ChangeNotifier {
 
     await loadNotes();
     await loadBookmarks();
+    await loadDrawings();
     notifyListeners();
   }
 
@@ -424,7 +474,9 @@ class PdfViewerViewModel extends ChangeNotifier {
   }
 
   void goToPage(int pageNumber) {
-    if (pdfViewerController != null && pageNumber >= 1 && pageNumber <= _totalPages) {
+    if (pdfViewerController != null &&
+        pageNumber >= 1 &&
+        pageNumber <= _totalPages) {
       pdfViewerController!.goToPage(pageNumber: pageNumber);
     }
   }
@@ -433,7 +485,9 @@ class PdfViewerViewModel extends ChangeNotifier {
     final controller = pdfViewerController;
     if (controller == null) return null;
     final pageIndex = pageNumber - 1;
-    if (pageIndex < 0 || pageIndex >= controller.document.pages.length) return null;
+    if (pageIndex < 0 || pageIndex >= controller.document.pages.length) {
+      return null;
+    }
 
     final cached = _pageTextCache[pageNumber];
     if (cached != null) return cached;
@@ -463,7 +517,7 @@ class PdfViewerViewModel extends ChangeNotifier {
       return;
     }
 
-    final rawRects = <PdfRect>[]; 
+    final rawRects = <PdfRect>[];
     final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
 
     for (final note in pageNotes) {
@@ -485,14 +539,14 @@ class PdfViewerViewModel extends ChangeNotifier {
         if (beforeOk && afterOk) {
           for (int i = idx; i < afterIdx; i++) {
             if (i >= pageText.charRects.length) break;
-            rawRects.add(pageText.charRects[i]); 
+            rawRects.add(pageText.charRects[i]);
           }
         }
         searchFrom = idx + targetWord.length;
       }
     }
 
-    _notedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects); 
+    _notedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects);
     notifyListeners();
   }
 
@@ -516,7 +570,7 @@ class PdfViewerViewModel extends ChangeNotifier {
 
     final targetWord = word.toLowerCase();
     final separatorPattern = RegExp(r'[\s\p{P}]', unicode: true);
-    final rawRects = <PdfRect>[]; 
+    final rawRects = <PdfRect>[];
 
     final textLower = pageText.fullText.toLowerCase();
     int searchFrom = 0;
@@ -533,13 +587,13 @@ class PdfViewerViewModel extends ChangeNotifier {
       if (beforeOk && afterOk) {
         for (int i = idx; i < afterIdx; i++) {
           if (i >= pageText.charRects.length) break;
-          rawRects.add(pageText.charRects[i]); 
+          rawRects.add(pageText.charRects[i]);
         }
       }
       searchFrom = idx + targetWord.length;
     }
 
-    _selectedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects); 
+    _selectedWordPdfRectsCache[pageNumber] = _mergeCharRectsToLines(rawRects);
   }
 
   Future<void> handleWordSelectionAt(Offset localPosition) async {
@@ -618,10 +672,12 @@ class PdfViewerViewModel extends ChangeNotifier {
       int startIndex = hitIndex;
       int endIndex = hitIndex;
 
-      while (startIndex > 0 && !separatorPattern.hasMatch(fullText[startIndex - 1])) {
+      while (startIndex > 0 &&
+          !separatorPattern.hasMatch(fullText[startIndex - 1])) {
         startIndex--;
       }
-      while (endIndex < fullText.length - 1 && !separatorPattern.hasMatch(fullText[endIndex + 1])) {
+      while (endIndex < fullText.length - 1 &&
+          !separatorPattern.hasMatch(fullText[endIndex + 1])) {
         endIndex++;
       }
 
@@ -635,5 +691,159 @@ class PdfViewerViewModel extends ChangeNotifier {
     } catch (_) {
       clearSelection();
     }
+  }
+
+  // ===================== РИСОВАНИЕ =====================
+
+  Future<void> loadDrawings() async {
+    if (_filePath == null) return;
+    _drawings
+      ..clear()
+      ..addAll(await drawingRepository.getDrawingsForPdf(_filePath!));
+    notifyListeners();
+  }
+
+  void toggleDrawMode() {
+    _isDrawMode = !_isDrawMode;
+    if (_isDrawMode) {
+      clearSelection();
+      _isEraserMode = false;
+    } else {
+      _currentStroke = null;
+      _isEraserMode = false;
+    }
+    notifyListeners();
+  }
+
+  void setDrawColor(Color c) {
+    _drawColor = c;
+    notifyListeners();
+  }
+
+  void setDrawWidth(double w) {
+    _drawWidth = w;
+    notifyListeners();
+  }
+
+  /// Старт штриха. Точка в нормализованных координатах страницы (0..1).
+  void startStroke(Offset normalizedPoint) {
+    _currentStroke = DrawingStroke(
+      points: [normalizedPoint],
+      color: _drawColor,
+      width: _drawWidth,
+    );
+    notifyListeners();
+  }
+
+  void appendPoint(Offset normalizedPoint) {
+    final s = _currentStroke;
+    if (s == null) return;
+    s.points.add(normalizedPoint);
+    notifyListeners();
+  }
+
+  Future<void> endStroke() async {
+    final s = _currentStroke;
+    if (s == null || s.points.length < 2) {
+      _currentStroke = null;
+      notifyListeners();
+      return;
+    }
+
+    final page = _currentPage;
+    final existing = _drawings.where((d) => d.pageNumber == page).toList();
+    if (existing.isEmpty) {
+      _drawings.add(PageDrawing(pageNumber: page, strokes: [s]));
+    } else {
+      existing.first.strokes.add(s);
+    }
+
+    _currentStroke = null;
+
+    if (_filePath != null) {
+      await drawingRepository.saveDrawingsForPdf(_filePath!, _drawings);
+    }
+    notifyListeners();
+  }
+
+  Future<void> undoLastStroke() async {
+    final pageList =
+        _drawings.where((d) => d.pageNumber == _currentPage).toList();
+    if (pageList.isEmpty || pageList.first.strokes.isEmpty) return;
+    pageList.first.strokes.removeLast();
+    if (_filePath != null) {
+      await drawingRepository.saveDrawingsForPdf(_filePath!, _drawings);
+    }
+    notifyListeners();
+  }
+
+  // ===================== ЛАСТИК =====================
+
+  void toggleEraser() {
+    _isEraserMode = !_isEraserMode;
+    if (_isEraserMode) {
+      _currentStroke = null;
+    }
+    notifyListeners();
+  }
+
+  /// Удаляет штрихи текущей страницы, попавшие в радиус ластика.
+  /// [normalizedPoint] — координаты 0..1 относительно страницы.
+  /// [radius] — радиус ластика в нормализованных координатах.
+  Future<bool> eraseAt(Offset normalizedPoint, {double radius = 0.02}) async {
+    final pageList =
+        _drawings.where((d) => d.pageNumber == _currentPage).toList();
+    if (pageList.isEmpty) return false;
+
+    final strokes = pageList.first.strokes;
+    final before = strokes.length;
+
+    // Соотношение сторон страницы — чтобы ластик был «круглым»
+    final controller = pdfViewerController;
+    double aspect = 1.0;
+    if (controller != null) {
+      final pageIndex = _currentPage - 1;
+      final layouts = controller.layout.pageLayouts;
+      if (pageIndex >= 0 && pageIndex < layouts.length) {
+        final w = layouts[pageIndex].width;
+        final h = layouts[pageIndex].height;
+        if (h > 0) aspect = w / h;
+      }
+    }
+
+    bool hitsStroke(DrawingStroke s) {
+      double minX = 1, minY = 1, maxX = 0, maxY = 0;
+      for (final p in s.points) {
+        if (p.dx < minX) minX = p.dx;
+        if (p.dy < minY) minY = p.dy;
+        if (p.dx > maxX) maxX = p.dx;
+        if (p.dy > maxY) maxY = p.dy;
+      }
+      final rx = radius / (aspect > 0 ? aspect : 1.0);
+      final ry = radius;
+      if (normalizedPoint.dx < minX - rx ||
+          normalizedPoint.dx > maxX + rx ||
+          normalizedPoint.dy < minY - ry ||
+          normalizedPoint.dy > maxY + ry) {
+        return false;
+      }
+
+      for (final p in s.points) {
+        final dx = (p.dx - normalizedPoint.dx) * aspect;
+        final dy = p.dy - normalizedPoint.dy;
+        if (dx * dx + dy * dy <= radius * radius) return true;
+      }
+      return false;
+    }
+
+    strokes.removeWhere(hitsStroke);
+
+    if (strokes.length == before) return false;
+
+    if (_filePath != null) {
+      await drawingRepository.saveDrawingsForPdf(_filePath!, _drawings);
+    }
+    notifyListeners();
+    return true;
   }
 }

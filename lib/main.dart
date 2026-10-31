@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import 'data/datasources/local_note_data_source.dart';
 import 'data/repositories/note_repository_impl.dart';
+import 'domain/repositories/drawing_repository.dart';
 import 'presentation/viewmodels/pdf_viewer_viewmodel.dart';
 import 'presentation/views/main_navigation_page.dart';
 
@@ -17,9 +18,13 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final localDataSource = LocalNoteDataSource();
     final noteRepository = NoteRepositoryImpl(localDataSource: localDataSource);
+    final drawingRepository = DrawingRepository();
 
     return ChangeNotifierProvider(
-      create: (_) => PdfViewerViewModel(noteRepository: noteRepository),
+      create: (_) => PdfViewerViewModel(
+        noteRepository: noteRepository,
+        drawingRepository: drawingRepository,
+      ),
       child: const _AppContent(),
     );
   }

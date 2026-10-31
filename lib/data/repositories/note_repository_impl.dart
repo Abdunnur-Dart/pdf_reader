@@ -8,23 +8,13 @@ class NoteRepositoryImpl implements NoteRepository {
   NoteRepositoryImpl({required this.localDataSource});
 
   @override
-  Future<void> saveNote(Note note) async {
-    // В старой версии вы, скорее всего, передавали сюда что-то вроде (note, pdfPath).
-    // Теперь LocalNoteDataSource.saveNote принимает только сам объект Note.
-    await localDataSource.saveNote(note);
-  }
+  Future<List<Note>> getNotesForPdf(String pdfPath) =>
+      localDataSource.getNotes(pdfPath); // ← если getNotes() без аргументов, уберите pdfPath
 
   @override
-  Future<void> deleteNote(String noteId, String pdfPath) async {
-    // В LocalNoteDataSource.deleteNote мы ищем по ID, pdfPath больше не нужен,
-    // так как все заметки хранятся в одном общем списке.
-    await localDataSource.deleteNote(noteId);
-  }
+  Future<void> saveNote(Note note) => localDataSource.saveNote(note);
 
   @override
-  Future<List<Note>> getNotesForPdf(String pdfPath) async {
-    // Получаем ВСЕ заметки из базы и фильтруем их по пути к PDF
-    final allNotes = await localDataSource.getNotes();
-    return allNotes.where((note) => note.pdfPath == pdfPath).toList();
-  }
+  Future<void> deleteNote(String noteId, String pdfPath) =>
+      localDataSource.deleteNote(noteId, pdfPath); // ← если deleteNote 1 аргумент, уберите pdfPath
 }
